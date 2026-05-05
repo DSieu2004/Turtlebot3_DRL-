@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # TurtleBot3 DRL Local Planner
 
 This package contains the DRL local planner research framework for the warehouse AMR simulation. The current baseline is already working in `turtlebot3_gazebo`: Gazebo simulation, SLAM, map saving, Nav2 localization, and RViz navigation goals.
@@ -339,3 +340,6 @@ attention_weights = exp(scores_ij) / Σ exp(scores_ik)
 
 Soft target update:
 θtarget ← τθsource + (1 − τ)θtarget
+=======
+# Turtlebot3_DRL-
+>>>>>>> f1695ac4688d77b73b8f43503d65959085eee373
