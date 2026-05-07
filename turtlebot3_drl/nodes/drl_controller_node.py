@@ -8,6 +8,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
@@ -66,7 +67,7 @@ class DRLControllerNode(Node):
         self.declare_parameter("heading_guard_min_heading_rad", controller_cfg.get("heading_guard_min_heading_rad", 0.08))
         self.declare_parameter("heading_guard_gain", controller_cfg.get("heading_guard_gain", 1.2))
         self.declare_parameter("heading_guard_clearance_m", controller_cfg.get("heading_guard_clearance_m", 0.30))
-        self.declare_parameter("goal_stop_distance_m", controller_cfg.get("goal_stop_distance_m", 0.35))
+        self.declare_parameter("goal_stop_distance_m", controller_cfg.get("goal_stop_distance_m", 0.05))
         self.declare_parameter("speed_governor_enabled", controller_cfg.get("speed_governor_enabled", True))
         self.declare_parameter("speed_slow_distance_m", controller_cfg.get("speed_slow_distance_m", 0.45))
         self.declare_parameter("speed_min_distance_m", controller_cfg.get("speed_min_distance_m", 0.22))
@@ -129,7 +130,8 @@ class DRLControllerNode(Node):
             self.get_parameter("debug_status_topic").value,
             10,
         )
-        self.create_subscription(LaserScan, self.get_parameter("input_scan_topic").value, self._scan_callback, 10)
+        # FIX #1: Add qos_profile_sensor_data for LaserScan
+        self.create_subscription(LaserScan, self.get_parameter("input_scan_topic").value, self._scan_callback, qos_profile_sensor_data)
         self.create_subscription(Odometry, self.get_parameter("input_odom_topic").value, self._odom_callback, 10)
         self.create_subscription(PoseStamped, self.get_parameter("input_goal_topic").value, self._goal_callback, 10)
         self.create_subscription(Path, self.get_parameter("input_plan_topic").value, self._plan_callback, 10)
@@ -223,12 +225,23 @@ class DRLControllerNode(Node):
         if mode == "final":
             return self.latest_plan.poses[-1]
         lookahead = float(self.get_parameter("lookahead_distance_m").value)
+        poses = self.latest_plan.poses
         if self.latest_odom is None:
-            return self.latest_plan.poses[min(len(self.latest_plan.poses) - 1, 0)]
-        for stamped_pose in self.latest_plan.poses:
+            return poses[0]
+        # Find the robot's closest point on the plan first, then look forward from there.
+        # Without this, poses[0] (behind the robot when the plan is old) becomes the lookahead
+        # target, producing large backward heading errors the policy was never trained to handle.
+        min_dist = math.inf
+        closest_idx = 0
+        for i, stamped_pose in enumerate(poses):
+            d = self._target_distance_to_robot(stamped_pose)
+            if d < min_dist:
+                min_dist = d
+                closest_idx = i
+        for stamped_pose in poses[closest_idx:]:
             if self._target_distance_to_robot(stamped_pose) >= lookahead:
                 return stamped_pose
-        return self.latest_plan.poses[-1]
+        return poses[-1]
 
     def _select_active_goal(self):
         prefer_plan = bool(self.get_parameter("prefer_plan_goal").value)
@@ -288,9 +301,11 @@ class DRLControllerNode(Node):
                 self._warned_missing_inputs = True
             self._publish_zero()
             return
+        # FIX #2: Only stop if this is the final goal_pose, not intermediate lookahead points
         if self._selected_goal_reached():
             self.controller_state = "goal_stop"
             self._publish_zero()
+            self._publish_debug(0.0, False)
             return
         state, nearest_distance, nearest_angle = self._build_state(goal, self.selected_goal_base_xy)
 
@@ -301,10 +316,13 @@ class DRLControllerNode(Node):
             return
 
         if self.get_parameter("safety_stop_enabled").value:
-            if nearest_distance < float(self.get_parameter("safety_stop_distance").value):
+            # Check front sector only — side walls in narrow passages must not trigger recovery
+            # when the forward path is still passable.
+            front_distance = self._sector_min(-0.52, 0.52)
+            if front_distance < float(self.get_parameter("safety_stop_distance").value):
                 if not self._warned_safety_stop:
                     self.get_logger().warn(
-                        f"Safety stop active: nearest obstacle distance is {nearest_distance:.3f} m."
+                        f"Safety stop active: front obstacle distance is {front_distance:.3f} m."
                     )
                     self._warned_safety_stop = True
                 if bool(self.get_parameter("recovery_enabled").value):
@@ -338,17 +356,20 @@ class DRLControllerNode(Node):
         self._publish_debug(nearest_distance, False)
 
     def _selected_goal_reached(self) -> bool:
-        if self.selected_goal_base_xy is None:
-            return False
-        distance = math.hypot(self.selected_goal_base_xy[0], self.selected_goal_base_xy[1])
-        return distance <= float(self.get_parameter("goal_stop_distance_m").value)
+        stop_dist = float(self.get_parameter("goal_stop_distance_m").value)
+        # Always check against the FINAL goal (end of plan), not the intermediate lookahead target.
+        # selected_goal_source is always "plan_lookahead" when prefer_plan_goal=true, so checking
+        # source=="goal_pose" would never trigger — that is what caused the robot to circle forever.
+        if self.latest_plan is not None and self.latest_plan.poses:
+            return self._target_distance_to_robot(self.latest_plan.poses[-1]) <= stop_dist
+        if self.selected_goal_base_xy is not None:
+            return math.hypot(self.selected_goal_base_xy[0], self.selected_goal_base_xy[1]) <= stop_dist
+        return False
 
     def _apply_heading_guard(self, action, nearest_distance: float):
         if not bool(self.get_parameter("heading_guard_enabled").value):
             return action
         if self.selected_goal_base_xy is None:
-            return action
-        if nearest_distance < float(self.get_parameter("heading_guard_clearance_m").value):
             return action
 
         target_heading = math.atan2(self.selected_goal_base_xy[1], self.selected_goal_base_xy[0])
@@ -356,16 +377,29 @@ class DRLControllerNode(Node):
         if abs(target_heading) < min_heading:
             return action
 
+        # Only suppress heading guard if obstacle is close AND heading error is small.
+        # Never suppress when misaligned > 60° — robot must rotate in place regardless of obstacle.
+        large_error = abs(target_heading) > (math.pi / 4)
+        if not large_error and nearest_distance < float(self.get_parameter("heading_guard_clearance_m").value):
+            return action
+
+        max_angular = float(self.get_parameter("max_angular_velocity").value)
+        gain = float(self.get_parameter("heading_guard_gain").value)
+        correction = float(np.clip(gain * target_heading, -max_angular, max_angular))
+
         angular = float(action[1])
-        if angular == 0.0 or math.copysign(1.0, angular) == math.copysign(1.0, target_heading):
+        # Skip only if policy already turns the right direction with sufficient magnitude.
+        # Previously this returned early when same direction at any magnitude, letting the
+        # robot drift off-path when the policy turned the right way but not enough.
+        if math.copysign(1.0, angular) == math.copysign(1.0, correction) and abs(angular) >= abs(correction):
             return action
 
         corrected = np.array(action, dtype=np.float32, copy=True)
-        max_angular = float(self.get_parameter("max_angular_velocity").value)
-        gain = float(self.get_parameter("heading_guard_gain").value)
-        corrected[1] = float(np.clip(gain * target_heading, -max_angular, max_angular))
-        # Slow forward motion while the guard corrects heading so the robot does not cut across the path.
-        corrected[0] = min(float(corrected[0]), 0.5 * float(self.get_parameter("max_linear_velocity").value))
+        corrected[1] = correction
+        if large_error:
+            corrected[0] = 0.0
+        else:
+            corrected[0] = min(float(corrected[0]), 0.5 * float(self.get_parameter("max_linear_velocity").value))
         return corrected
 
     def _apply_speed_governor(self, action, nearest_distance: float):
@@ -385,7 +419,8 @@ class DRLControllerNode(Node):
             )
         scale = float(np.clip(scale, min_scale, 1.0))
         governed = np.array(action, dtype=np.float32, copy=True)
-        governed[0] = max(0.0, float(governed[0]) * scale)
+        # FIX #4: Use max() instead of max() - but only for forward motion (v > 0)
+        governed[0] = float(governed[0]) * scale if governed[0] > 0 else float(governed[0])
         return governed
 
     def _recovery_active(self) -> bool:
@@ -435,8 +470,9 @@ class DRLControllerNode(Node):
         centering_error = float(left_min - right_min)
         angular = centering_gain * centering_error + 0.35 * target_heading
         if front_constrained:
+            # Slow down when something is close ahead — do NOT add a sideways turn impulse,
+            # that caused the robot to veer off-axis in gaps it should traverse straight.
             twist.linear.x = min(twist.linear.x, 0.5 * float(self.get_parameter("narrow_passage_linear_velocity").value))
-            angular += self._recovery_turn_sign_from_obstacle(0.0) * 0.25
         twist.angular.z = float(np.clip(angular, -max_angular, max_angular))
         if nearest_distance < float(self.get_parameter("speed_min_distance_m").value):
             twist.linear.x = min(twist.linear.x, 0.01)
@@ -502,6 +538,9 @@ def main(args=None):
     node = DRLControllerNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

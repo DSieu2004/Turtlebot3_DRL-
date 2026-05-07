@@ -27,8 +27,8 @@ state:
 action:
   # ROS/Gazebo training adaptation: start conservatively while the policy is random.
   # The paper-derived TurtleBot3 action limits remain documented in README.md.
-  max_linear_velocity: 0.08
-  max_angular_velocity: 0.8
+  max_linear_velocity: 0.20
+  max_angular_velocity: 0.30  # Reduced from 0.50 — slow turns eliminate left-right sway
   allow_reverse: false
 
 reward:
@@ -79,34 +79,34 @@ ros:
   shadow_cmd_vel_topic: /cmd_vel_drl
   publish_directly_to_cmd_vel: true
   safety_stop_enabled: true
-  safety_stop_distance: 0.18
+  safety_stop_distance: 0.14
   inference_rate_hz: 10.0
   fixed_frame: map
   base_frame: base_link
 
 controller:
   plan_target_mode: lookahead
-  lookahead_distance_m: 0.6
+  lookahead_distance_m: 0.50
   prefer_plan_goal: true
   publish_debug: true
   heading_guard_enabled: true
-  heading_guard_min_heading_rad: 0.08
-  heading_guard_gain: 1.2
-  heading_guard_clearance_m: 0.30
-  goal_stop_distance_m: 0.35
+  heading_guard_min_heading_rad: 0.25
+  heading_guard_gain: 0.35
+  heading_guard_clearance_m: 0.15
+  goal_stop_distance_m: 0.05
   speed_governor_enabled: true
   speed_slow_distance_m: 0.45
-  speed_min_distance_m: 0.22
-  speed_min_scale: 0.15
+  speed_min_distance_m: 0.19          # Reduced from 0.22 — don't slow to minimum unless very close
+  speed_min_scale: 0.50               # Raised from 0.25 — minimum speed must be enough to move
   recovery_enabled: true
-  recovery_linear_velocity: -0.035
-  recovery_angular_velocity: 0.55
-  recovery_front_angle_rad: 0.35
-  recovery_duration_sec: 0.8
+  recovery_linear_velocity: -0.08
+  recovery_angular_velocity: 0.35
+  recovery_front_angle_rad: 0.52
+  recovery_duration_sec: 1.5
   narrow_passage_enabled: true
   narrow_passage_clearance_m: 0.42
   narrow_passage_front_clearance_m: 0.24
-  narrow_passage_linear_velocity: 0.025
+  narrow_passage_linear_velocity: 0.06 
   narrow_passage_centering_gain: 1.4
   narrow_passage_max_angular_velocity: 0.45
 

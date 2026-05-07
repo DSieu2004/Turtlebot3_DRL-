@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import GroupAction
 from launch.actions import IncludeLaunchDescription
+from launch.actions import TimerAction
 from launch.conditions import IfCondition
 from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -79,12 +80,12 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "drl_direct",
-                default_value="false",
+                default_value="true",
                 description="When true, DRL publishes /cmd_vel and Nav2 is remapped to /cmd_vel_nav2.",
             ),
             DeclareLaunchArgument("lookahead_distance_m", default_value="0.4"),
-            DeclareLaunchArgument("safety_stop_distance", default_value="0.18"),
-            DeclareLaunchArgument("goal_stop_distance_m", default_value="0.35"),
+            DeclareLaunchArgument("safety_stop_distance", default_value="0.10"),
+            DeclareLaunchArgument("goal_stop_distance_m", default_value="0.05"),
             Node(
                 package="hls_lfcd_lds_driver",
                 executable="hlds_laser_publisher",
@@ -122,7 +123,13 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="agv_controller",
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="static_tf_odom_init",
+                arguments=["0", "0", "0", "0", "0", "0", "odom", "base_link"],
+            ),
+            Node(
+                package="turtlebot3_drl",
                 executable="diff_drive_controller",
                 name="diff_drive_controller",
                 output="screen",
@@ -146,6 +153,7 @@ def generate_launch_description():
                 actions=[
                     SetRemap(src="/cmd_vel", dst="/cmd_vel_nav2"),
                     SetRemap(src="cmd_vel", dst="/cmd_vel_nav2"),
+                    SetRemap(src="cmd_vel_smoothed", dst="/cmd_vel_nav2"),
                     _nav2_bringup_include(nav2_bringup_dir, map_yaml_file, params_file),
                 ],
             ),

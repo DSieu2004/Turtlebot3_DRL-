@@ -25,6 +25,8 @@ setup(
             "drl_controller_node = turtlebot3_drl.nodes.drl_controller_node:main",
             "eval_shadow_compare = turtlebot3_drl.eval_shadow_compare:main",
             "export_policy = turtlebot3_drl.export_policy:main",
+            'diff_drive_controller = agv_drl.diff_drive_controller:main',
+            'slam_manager_node = agv_drl.slam_manager_node:main'
         ],
     },
 )
